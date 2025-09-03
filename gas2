@@ -1,0 +1,377 @@
+/**
+ * 出勤簿シート用GASエンドポイント
+ * 2025-07-10
+ * 
+ * このスクリプトは出勤簿用の別スプレッドシートで動作します
+ * Omada Webhook受信用GASから送信されたデータを受け取り、記録します
+ */
+
+function doPost(e) {
+  /* ---------- 1. 受信データ解析 ---------- */
+  const raw = (e.postData && e.postData.contents) ? e.postData.contents : '{}';
+  const data = _safeJson_(raw);
+  
+  if (!data.username || !data.timestamp) {
+    return _error_('必須パラメータが不足しています');
+  }
+  
+  /* ---------- 2. スプレッドシート準備 ---------- */
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  // 出勤簿シート（メイン）
+  const attendanceSheet = ss.getSheetByName('出勤簿') || _createAttendanceSheet_(ss);
+  
+  // 生データ保存用シート
+  const rawDataSheet = ss.getSheetByName('raw_data') || _createRawDataSheet_(ss);
+  
+  // 月次集計シート
+  const monthlySummarySheet = ss.getSheetByName('月次集計') || _createMonthlySummarySheet_(ss);
+  
+  /* ---------- 3. 生データ記録 ---------- */
+  rawDataSheet.appendRow([
+    new Date(),
+    data.username,
+    data.timestamp,
+    data.state,
+    data.name,
+    data.devicename,
+    data.ipaddr,
+    data.MAC,
+    data.description,
+    JSON.stringify(data)
+  ]);
+  
+  /* ---------- 4. 出勤簿更新 ---------- */
+  _updateAttendanceSheet_(attendanceSheet, data);
+  
+  /* ---------- 5. 月次集計更新 ---------- */
+  _updateMonthlySummary_(monthlySummarySheet, attendanceSheet);
+  
+  return _ok_();
+}
+
+/* ================================================================= */
+/* 出勤簿更新処理 --------------------------------------------------- */
+/* ================================================================= */
+
+function _updateAttendanceSheet_(sheet, data) {
+  const timestamp = new Date(data.timestamp);
+  const dateStr = Utilities.formatDate(timestamp, 'Asia/Tokyo', 'yyyy/MM/dd');
+  const timeStr = Utilities.formatDate(timestamp, 'Asia/Tokyo', 'HH:mm:ss');
+  
+  // 既存の行を検索
+  const lastRow = sheet.getLastRow();
+  let targetRow = -1;
+  
+  if (lastRow > 1) {
+    const dates = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    const users = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+    
+    for (let i = 0; i < dates.length; i++) {
+      const rowDateStr = Utilities.formatDate(dates[i][0], 'Asia/Tokyo', 'yyyy/MM/dd');
+      if (rowDateStr === dateStr && users[i][0] === data.username) {
+        targetRow = i + 2;
+        break;
+      }
+    }
+  }
+  
+  // 出勤・退勤の判定
+  const isArrival = data.description.includes('出勤');
+  const isDeparture = data.description.includes('退勤');
+  
+  if (targetRow === -1) {
+    // 新規行追加
+    const newRow = [
+      timestamp,
+      data.username,
+      isArrival ? timeStr : '',
+      isDeparture ? timeStr : '',
+      '',  // 休憩時間
+      '',  // 実働時間
+      data.description
+    ];
+    sheet.appendRow(newRow);
+  } else {
+    // 既存行更新
+    if (isArrival) {
+      sheet.getRange(targetRow, 3).setValue(timeStr);
+    } else if (isDeparture) {
+      sheet.getRange(targetRow, 4).setValue(timeStr);
+      _calculateWorkTime_(sheet, targetRow);
+    }
+    
+    // 備考欄更新
+    const currentNote = sheet.getRange(targetRow, 7).getValue();
+    sheet.getRange(targetRow, 7).setValue(currentNote + '\n' + `[${timeStr}] ${data.description}`);
+  }
+}
+
+/* ================================================================= */
+/* 実働時間計算 ----------------------------------------------------- */
+/* ================================================================= */
+
+function _calculateWorkTime_(sheet, row) {
+  const arrivalTime = sheet.getRange(row, 3).getValue();
+  const departureTime = sheet.getRange(row, 4).getValue();
+  
+  if (!arrivalTime || !departureTime) return;
+  
+  // 時刻文字列をDateオブジェクトに変換
+  const dateCell = sheet.getRange(row, 1).getValue();
+  const dateStr = Utilities.formatDate(dateCell, 'Asia/Tokyo', 'yyyy/MM/dd');
+  
+  const arrival = new Date(dateStr + ' ' + arrivalTime);
+  const departure = new Date(dateStr + ' ' + departureTime);
+  
+  // 実働時間計算（ミリ秒差分）
+  const workMillis = departure.getTime() - arrival.getTime();
+  
+  // 休憩時間の自動計算（6時間以上で45分、8時間以上で60分）
+  let breakMinutes = 0;
+  const workHours = workMillis / (1000 * 60 * 60);
+  
+  if (workHours >= 8) {
+    breakMinutes = 60;
+  } else if (workHours >= 6) {
+    breakMinutes = 45;
+  }
+  
+  // 実働時間 = 総労働時間 - 休憩時間
+  const actualWorkMillis = workMillis - (breakMinutes * 60 * 1000);
+  
+  // 時間フォーマット
+  const breakTime = breakMinutes > 0 ? `${breakMinutes}分` : '';
+  const actualWorkHours = Math.floor(actualWorkMillis / (1000 * 60 * 60));
+  const actualWorkMinutes = Math.floor((actualWorkMillis % (1000 * 60 * 60)) / (1000 * 60));
+  const actualWorkTime = `${actualWorkHours}時間${actualWorkMinutes}分`;
+  
+  // セルに設定
+  sheet.getRange(row, 5).setValue(breakTime);
+  sheet.getRange(row, 6).setValue(actualWorkTime);
+}
+
+/* ================================================================= */
+/* 月次集計更新 ----------------------------------------------------- */
+/* ================================================================= */
+
+function _updateMonthlySummary_(summarySheet, attendanceSheet) {
+  const now = new Date();
+  const currentMonth = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy/MM');
+  
+  // 出勤簿から当月のデータを取得
+  const lastRow = attendanceSheet.getLastRow();
+  if (lastRow <= 1) return;
+  
+  const allData = attendanceSheet.getRange(2, 1, lastRow - 1, 6).getValues();
+  
+  // ユーザーごとの集計
+  const userSummary = new Map();
+  
+  allData.forEach(row => {
+    const date = row[0];
+    const user = row[1];
+    const workTime = row[5];
+    
+    if (!date || !user) return;
+    
+    const monthStr = Utilities.formatDate(date, 'Asia/Tokyo', 'yyyy/MM');
+    if (monthStr !== currentMonth) return;
+    
+    if (!userSummary.has(user)) {
+      userSummary.set(user, {
+        days: 0,
+        totalMinutes: 0
+      });
+    }
+    
+    const summary = userSummary.get(user);
+    
+    // 出勤日数カウント
+    if (row[2]) { // 出社時刻がある場合
+      summary.days++;
+    }
+    
+    // 実働時間の集計
+    if (workTime) {
+      const match = workTime.match(/(\d+)時間(\d+)分/);
+      if (match) {
+        summary.totalMinutes += parseInt(match[1]) * 60 + parseInt(match[2]);
+      }
+    }
+  });
+  
+  // 集計シートをクリアして更新
+  if (summarySheet.getLastRow() > 1) {
+    summarySheet.getRange(2, 1, summarySheet.getLastRow() - 1, 5).clear();
+  }
+  
+  let rowIndex = 2;
+  userSummary.forEach((summary, user) => {
+    const totalHours = Math.floor(summary.totalMinutes / 60);
+    const totalMins = summary.totalMinutes % 60;
+    
+    summarySheet.getRange(rowIndex, 1, 1, 5).setValues([[
+      currentMonth,
+      user,
+      summary.days,
+      `${totalHours}時間${totalMins}分`,
+      new Date()
+    ]]);
+    rowIndex++;
+  });
+}
+
+/* ================================================================= */
+/* シート作成関数 --------------------------------------------------- */
+/* ================================================================= */
+
+function _createAttendanceSheet_(ss) {
+  const sheet = ss.insertSheet('出勤簿');
+  sheet.getRange(1, 1, 1, 7).setValues([[
+    '日付', 'ユーザー名', '出社時刻', '退社時刻', '休憩時間', '実働時間', '備考'
+  ]]);
+  
+  // 列幅調整
+  sheet.setColumnWidth(1, 100);
+  sheet.setColumnWidth(2, 120);
+  sheet.setColumnWidth(3, 80);
+  sheet.setColumnWidth(4, 80);
+  sheet.setColumnWidth(5, 80);
+  sheet.setColumnWidth(6, 100);
+  sheet.setColumnWidth(7, 300);
+  
+  // ヘッダー装飾
+  const header = sheet.getRange(1, 1, 1, 7);
+  header.setBackground('#4a86e8');
+  header.setFontColor('#ffffff');
+  header.setFontWeight('bold');
+  
+  return sheet;
+}
+
+function _createRawDataSheet_(ss) {
+  const sheet = ss.insertSheet('raw_data');
+  sheet.getRange(1, 1, 1, 10).setValues([[
+    '受信時刻', 'username', 'timestamp', 'state', 'name', 
+    'devicename', 'ipaddr', 'MAC', 'description', 'raw_json'
+  ]]);
+  
+  // ヘッダー装飾
+  const header = sheet.getRange(1, 1, 1, 10);
+  header.setBackground('#666666');
+  header.setFontColor('#ffffff');
+  header.setFontWeight('bold');
+  
+  return sheet;
+}
+
+function _createMonthlySummarySheet_(ss) {
+  const sheet = ss.insertSheet('月次集計');
+  sheet.getRange(1, 1, 1, 5).setValues([[
+    '年月', 'ユーザー名', '出勤日数', '総実働時間', '更新日時'
+  ]]);
+  
+  // ヘッダー装飾
+  const header = sheet.getRange(1, 1, 1, 5);
+  header.setBackground('#0f9d58');
+  header.setFontColor('#ffffff');
+  header.setFontWeight('bold');
+  
+  // 列幅調整
+  sheet.setColumnWidth(1, 80);
+  sheet.setColumnWidth(2, 120);
+  sheet.setColumnWidth(3, 80);
+  sheet.setColumnWidth(4, 100);
+  sheet.setColumnWidth(5, 150);
+  
+  return sheet;
+}
+
+/* ================================================================= */
+/* ユーティリティ関数 ----------------------------------------------- */
+/* ================================================================= */
+
+function _ok_() {
+  return ContentService.createTextOutput(JSON.stringify({status: 'ok'}))
+         .setMimeType(ContentService.MimeType.JSON);
+}
+
+function _error_(message) {
+  return ContentService.createTextOutput(JSON.stringify({status: 'error', message: message}))
+         .setMimeType(ContentService.MimeType.JSON);
+}
+
+function _safeJson_(txt) {
+  try { 
+    return JSON.parse(txt); 
+  } catch(e) { 
+    return { parseError: e.toString(), raw: txt }; 
+  }
+}
+
+/* ================================================================= */
+/* 定期実行用関数（必要に応じて設定） --------------------------------- */
+/* ================================================================= */
+
+/**
+ * 日次で前日の退勤判定を行う関数
+ * トリガーで毎日深夜に実行することを推奨
+ */
+function dailyAttendanceCheck() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const attendanceSheet = ss.getSheetByName('出勤簿');
+  if (!attendanceSheet) return;
+  
+  const lastRow = attendanceSheet.getLastRow();
+  if (lastRow <= 1) return;
+  
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = Utilities.formatDate(yesterday, 'Asia/Tokyo', 'yyyy/MM/dd');
+  
+  // 昨日のデータで退社時刻が空のものを検索
+  for (let i = 2; i <= lastRow; i++) {
+    const date = attendanceSheet.getRange(i, 1).getValue();
+    const dateStr = Utilities.formatDate(date, 'Asia/Tokyo', 'yyyy/MM/dd');
+    
+    if (dateStr === yesterdayStr) {
+      const departureTime = attendanceSheet.getRange(i, 4).getValue();
+      if (!departureTime) {
+        // 退社時刻が記録されていない場合、22:00を仮設定
+        attendanceSheet.getRange(i, 4).setValue('22:00:00');
+        attendanceSheet.getRange(i, 7).setValue(
+          attendanceSheet.getRange(i, 7).getValue() + '\n[システム] 退社時刻未記録のため22:00を仮設定'
+        );
+        _calculateWorkTime_(attendanceSheet, i);
+      }
+    }
+  }
+  
+  // 月次集計を更新
+  const monthlySummarySheet = ss.getSheetByName('月次集計');
+  if (monthlySummarySheet) {
+    _updateMonthlySummary_(monthlySummarySheet, attendanceSheet);
+  }
+}
+
+/**
+ * 初期セットアップ用関数
+ */
+function setupAttendanceSheets() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  if (!ss.getSheetByName('出勤簿')) {
+    _createAttendanceSheet_(ss);
+  }
+  
+  if (!ss.getSheetByName('raw_data')) {
+    _createRawDataSheet_(ss);
+  }
+  
+  if (!ss.getSheetByName('月次集計')) {
+    _createMonthlySummarySheet_(ss);
+  }
+  
+  SpreadsheetApp.getUi().alert('シートのセットアップが完了しました。');
+}

@@ -335,6 +335,71 @@ function _updateMonthlySummary_(summarySheet, attendanceSheet) {
   });
 }
 
+/**
+ * 月次集計を全期間分フルで再構築（reprocessRawData 用）
+ */
+function _rebuildMonthlySummaryAll_(summarySheet, attendanceSheet) {
+  const lastRow = attendanceSheet.getLastRow();
+  if (lastRow <= 1) return;
+
+  const schema = _getAttendanceSchema_(attendanceSheet);
+  const allData = attendanceSheet.getRange(2, 1, lastRow - 1, schema.colCount).getValues();
+
+  const summaryMap = new Map(); // key: yyyy/MM__user__facility
+
+  allData.forEach(row => {
+    const date = row[schema.colDate-1];
+    const user = row[schema.colUser-1];
+    const facility = schema.colFacility ? (row[schema.colFacility-1] || '') : '';
+    const arrivalTime = row[schema.colArrive-1];
+    const workTime = row[schema.colWork-1];
+
+    if (!date || !user) return;
+
+    const monthStr = Utilities.formatDate(new Date(date), 'Asia/Tokyo', 'yyyy/MM');
+    const key = `${monthStr}__${user}__${facility}`;
+    if (!summaryMap.has(key)) {
+      summaryMap.set(key, { month: monthStr, user, facility, days: 0, totalMinutes: 0 });
+    }
+
+    const summary = summaryMap.get(key);
+    if (arrivalTime) summary.days++;
+    if (workTime) {
+      const m = String(workTime).match(/(\d+)時間(\d+)分/);
+      if (m) summary.totalMinutes += parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+    }
+  });
+
+  // 既存の内容をクリア（ヘッダー保持）
+  if (summarySheet.getLastRow() > 1) {
+    summarySheet.getRange(2, 1, summarySheet.getLastRow() - 1, 6).clearContent();
+  }
+
+  // 書き込み（ソート: 月→ユーザー→施設）
+  const rows = Array.from(summaryMap.values()).sort((a, b) => {
+    if (a.month !== b.month) return a.month < b.month ? -1 : 1;
+    if (a.user !== b.user) return a.user < b.user ? -1 : 1;
+    return (a.facility || '') < (b.facility || '') ? -1 : ((a.facility || '') > (b.facility || '') ? 1 : 0);
+  });
+
+  let rowIndex = 2;
+  for (const s of rows) {
+    const totalHours = Math.floor(s.totalMinutes / 60);
+    const totalMins = s.totalMinutes % 60;
+    summarySheet.getRange(rowIndex, 1, 1, 6).setValues([
+      [
+        s.month,
+        s.user,
+        s.facility,
+        s.days,
+        `${totalHours}時間${totalMins}分`,
+        new Date()
+      ]
+    ]);
+    rowIndex++;
+  }
+}
+
 
 /* ================================================================= */
 /* シート作成関数 --------------------------------------------------- */
@@ -572,7 +637,8 @@ function reprocessRawData() {
 
   // 5. 月次集計を更新
   if (monthlySummarySheet) {
-    _updateMonthlySummary_(monthlySummarySheet, attendanceSheet);
+    // 再構築時は全月分をフルリビルド
+    _rebuildMonthlySummaryAll_(monthlySummarySheet, attendanceSheet);
   }
 
   ui.alert('出勤簿の再構築が完了しました。');

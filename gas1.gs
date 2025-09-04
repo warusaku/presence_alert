@@ -98,6 +98,8 @@ function doPost(e) {
       } catch(e) {
         console.error('出勤簿エンドポイントへの送信エラー:', e);
       }
+    } else if (endpoint && !facilityName) {
+      console.warn('facilityNameが空のためgas2への送信をスキップ');
     }
 
     /* ---------- 8. Discord通知 ---------- */
@@ -108,8 +110,6 @@ function doPost(e) {
     return _ok_();
   } finally {
     try { lock.releaseLock(); } catch (_) {}
-  } else if (endpoint && !facilityName) {
-    console.warn('facilityNameが空のためgas2への送信をスキップ');
   }
 }
 

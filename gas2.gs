@@ -66,6 +66,7 @@ function doPost(e) {
 /* ================================================================= */
 
 function _updateAttendanceSheet_(sheet, data) {
+  const schema = _getAttendanceSchema_(sheet);
   const timestamp = data.timestampMs ? new Date(Number(data.timestampMs)) : _parseTimestamp_(data.timestamp);
   const dateStr = Utilities.formatDate(timestamp, 'Asia/Tokyo', 'yyyy/MM/dd');
   const timeStr = Utilities.formatDate(timestamp, 'Asia/Tokyo', 'HH:mm:ss');
@@ -77,13 +78,15 @@ function _updateAttendanceSheet_(sheet, data) {
 
   // 1. スプレッドシートから全データを一度に読み込む
   const lastRow = sheet.getLastRow();
-  const allValues = lastRow > 1 ? sheet.getRange(2, 1, lastRow - 1, 8).getValues() : [];
+  const allValues = lastRow > 1 ? sheet.getRange(2, 1, lastRow - 1, schema.colCount).getValues() : [];
   let targetRow = -1;
 
   // 2. まず同日の記録を後ろから探す
   for (let i = allValues.length - 1; i >= 0; i--) {
-    const rowDateStr = Utilities.formatDate(new Date(allValues[i][0]), 'Asia/Tokyo', 'yyyy/MM/dd');
-    if (rowDateStr === dateStr && allValues[i][1] === data.username && allValues[i][2] === facilityName) {
+    const rowDateStr = Utilities.formatDate(new Date(allValues[i][schema.colDate-1]), 'Asia/Tokyo', 'yyyy/MM/dd');
+    const rowUser = allValues[i][schema.colUser-1];
+    const rowFacility = schema.colFacility ? allValues[i][schema.colFacility-1] : facilityName;
+    if (rowDateStr === dateStr && rowUser === data.username && rowFacility === facilityName) {
       targetRow = i + 2;
       break;
     }
@@ -96,9 +99,11 @@ function _updateAttendanceSheet_(sheet, data) {
     const yesterdayStr = Utilities.formatDate(yesterday, 'Asia/Tokyo', 'yyyy/MM/dd');
     for (let i = allValues.length - 1; i >= 0; i--) {
       const rowData = allValues[i];
-      const rowDateStr = Utilities.formatDate(new Date(rowData[0]), 'Asia/Tokyo', 'yyyy/MM/dd');
-      const rowDepartureTime = rowData[4]; // 退勤時刻
-      if (rowDateStr === yesterdayStr && rowData[1] === data.username && rowData[2] === facilityName && !rowDepartureTime) {
+      const rowDateStr = Utilities.formatDate(new Date(rowData[schema.colDate-1]), 'Asia/Tokyo', 'yyyy/MM/dd');
+      const rowDepartureTime = rowData[schema.colDepart-1];
+      const rowUser = rowData[schema.colUser-1];
+      const rowFacility = schema.colFacility ? rowData[schema.colFacility-1] : facilityName;
+      if (rowDateStr === yesterdayStr && rowUser === data.username && rowFacility === facilityName && !rowDepartureTime) {
         targetRow = i + 2; // 前日の行をターゲットにする
         break;
       }
@@ -108,49 +113,59 @@ function _updateAttendanceSheet_(sheet, data) {
   // 4. データの更新または新規追加
   if (targetRow === -1) {
     // 新規行を追加
-    const newRow = [
-      timestamp, data.username, facilityName,
-      isOnline ? timeStr : '',
-      isDeparture ? timeStr : '',
-      '', '', `[${timeStr}] ${data.description || ''}`
-    ];
+    let newRow;
+    if (schema.colFacility) {
+      newRow = [
+        timestamp, data.username, facilityName,
+        isOnline ? timeStr : '',
+        isDeparture ? timeStr : '',
+        '', '', `[${timeStr}] ${data.description || ''}`
+      ];
+    } else {
+      newRow = [
+        timestamp, data.username,
+        isOnline ? timeStr : '',
+        isDeparture ? timeStr : '',
+        '', '', `[${timeStr}] ${data.description || ''}`
+      ];
+    }
     sheet.appendRow(newRow);
   } else {
     // 既存行を更新
-    const arrivalTime = sheet.getRange(targetRow, 4).getValue();
-    const departureTime = sheet.getRange(targetRow, 5).getValue();
+    const arrivalTime = sheet.getRange(targetRow, schema.colArrive).getValue();
+    const departureTime = sheet.getRange(targetRow, schema.colDepart).getValue();
 
     // 外出復帰判定: 既に退勤時刻があり、8時間以内にONLINEで戻った
     if (isOnline && departureTime) {
-      const dep = _toDateWithTime_(sheet.getRange(targetRow, 1).getValue(), departureTime);
+      const dep = _toDateWithTime_(sheet.getRange(targetRow, schema.colDate).getValue(), departureTime);
       const diffMs = timestamp.getTime() - dep.getTime();
       if (diffMs >= 0 && diffMs <= OUTING_WINDOW_MS) {
         // 退勤を取り消し、外出として備考に記録
-        sheet.getRange(targetRow, 5).clearContent();
+        sheet.getRange(targetRow, schema.colDepart).clearContent();
         const outingMinutes = Math.round(diffMs / 60000);
         const outingHours = Math.floor(outingMinutes / 60);
         const outingMinsR = outingMinutes % 60;
-        const currentNote = sheet.getRange(targetRow, 8).getValue();
+        const currentNote = sheet.getRange(targetRow, schema.colNote).getValue();
         const extra = `[${timeStr}] 外出から復帰（外出${outingHours}時間${outingMinsR}分） [OUTING_MINUTES=${outingMinutes}]`;
-        sheet.getRange(targetRow, 8).setValue(currentNote + '\n' + extra);
+        sheet.getRange(targetRow, schema.colNote).setValue(currentNote ? (currentNote + '\n' + extra) : extra);
         // 退勤取消に伴い実働時間は未確定に戻るため、計算はしない
       } else if (isOnline && !arrivalTime) {
         // 8時間超の復帰、かつ出社時刻未設定なら通常通り出社時刻を設定
-        sheet.getRange(targetRow, 4).setValue(timeStr);
+        sheet.getRange(targetRow, schema.colArrive).setValue(timeStr);
       }
     } else if (isOnline && !arrivalTime) {
       // 通常の初回出社記録
-      sheet.getRange(targetRow, 4).setValue(timeStr);
+      sheet.getRange(targetRow, schema.colArrive).setValue(timeStr);
     } else if (isDeparture) {
       // 退勤記録
-      sheet.getRange(targetRow, 5).setValue(timeStr);
+      sheet.getRange(targetRow, schema.colDepart).setValue(timeStr);
       _calculateWorkTime_(sheet, targetRow);
     }
 
     // 備考追記（常に記録）
-    const currentNote2 = String(sheet.getRange(targetRow, 8).getValue() || '');
+    const currentNote2 = String(sheet.getRange(targetRow, schema.colNote).getValue() || '');
     const noteAppend = `[${timeStr}] ${data.description || ''}`;
-    sheet.getRange(targetRow, 8).setValue(currentNote2 ? (currentNote2 + '\n' + noteAppend) : noteAppend);
+    sheet.getRange(targetRow, schema.colNote).setValue(currentNote2 ? (currentNote2 + '\n' + noteAppend) : noteAppend);
   }
 }
 
@@ -159,13 +174,14 @@ function _updateAttendanceSheet_(sheet, data) {
 /* ================================================================= */
 
 function _calculateWorkTime_(sheet, row) {
-  const arrivalTime = sheet.getRange(row, 4).getValue(); // D列
-  const departureTime = sheet.getRange(row, 5).getValue(); // E列
+  const schema = _getAttendanceSchema_(sheet);
+  const arrivalTime = sheet.getRange(row, schema.colArrive).getValue();
+  const departureTime = sheet.getRange(row, schema.colDepart).getValue();
 
   if (!arrivalTime || !departureTime) return;
 
   // 時刻文字列をDateオブジェクトに変換
-  const dateCell = sheet.getRange(row, 1).getValue();
+  const dateCell = sheet.getRange(row, schema.colDate).getValue();
   
   // 到着/退勤のDate化を安全に行う
   const arrival = _toDateWithTime_(dateCell, arrivalTime);
@@ -176,7 +192,7 @@ function _calculateWorkTime_(sheet, row) {
   const workMillis = departure.getTime() - arrival.getTime();
 
   // 備考から外出分（分）を抽出
-  const noteText = String(sheet.getRange(row, 8).getValue() || '');
+  const noteText = String(sheet.getRange(row, schema.colNote).getValue() || '');
   let outingMinutesSum = 0;
   const re = /\[OUTING_MINUTES=(\d+)\]/g;
   let m;
@@ -214,8 +230,8 @@ function _calculateWorkTime_(sheet, row) {
   }
 
   // セルに設定
-  sheet.getRange(row, 6).setValue(displayBreak); // F列
-  sheet.getRange(row, 7).setValue(actualWorkTime); // G列
+  sheet.getRange(row, schema.colBreak).setValue(displayBreak);
+  sheet.getRange(row, schema.colWork).setValue(actualWorkTime);
 }
 
 /* ================================================================= */
@@ -230,24 +246,25 @@ function _updateMonthlySummary_(summarySheet, attendanceSheet) {
   const lastRow = attendanceSheet.getLastRow();
   if (lastRow <= 1) return;
 
-  const allData = attendanceSheet.getRange(2, 1, lastRow - 1, 7).getValues(); // 7列に
+  const schema = _getAttendanceSchema_(attendanceSheet);
+  const allData = attendanceSheet.getRange(2, 1, lastRow - 1, schema.colCount).getValues();
 
   // ユーザーと施設ごとの集計
   const summaryMap = new Map();
 
   allData.forEach(row => {
-    const date = row[0];
-    const user = row[1];
-    const facility = row[2];
-    const arrivalTime = row[3];
-    const workTime = row[6];
+    const date = row[schema.colDate-1];
+    const user = row[schema.colUser-1];
+    const facility = schema.colFacility ? row[schema.colFacility-1] : '';
+    const arrivalTime = row[schema.colArrive-1];
+    const workTime = row[schema.colWork-1];
 
     if (!date || !user || !facility) return;
 
     const monthStr = Utilities.formatDate(new Date(date), 'Asia/Tokyo', 'yyyy/MM');
     if (monthStr !== currentMonth) return;
 
-    const summaryKey = `${user}_${facility}`;
+    const summaryKey = `${user}_${facility || 'ALL'}`;
     if (!summaryMap.has(summaryKey)) {
       summaryMap.set(summaryKey, {
         user: user,
@@ -421,16 +438,17 @@ function dailyAttendanceCheck() {
   const lastRow = attendanceSheet.getLastRow();
   if (lastRow <= 1) return;
 
+  const schema = _getAttendanceSchema_(attendanceSheet);
   const now = new Date();
   const gracePeriodHours = 24; // 24時間以上の勤務を異常とみなす
 
-  const dataRange = attendanceSheet.getRange(2, 1, lastRow - 1, 8);
+  const dataRange = attendanceSheet.getRange(2, 1, lastRow - 1, schema.colCount);
   const values = dataRange.getValues();
 
   for (let i = 0; i < values.length; i++) {
     const rowData = values[i];
-    const arrivalDate = rowData[0];
-    const departureTime = rowData[4];
+    const arrivalDate = rowData[schema.colDate-1];
+    const departureTime = rowData[schema.colDepart-1];
 
     if (arrivalDate && !departureTime) {
       // 出勤時刻から24時間以上経過しているかチェック
@@ -442,10 +460,10 @@ function dailyAttendanceCheck() {
         const endOfDay = new Date(arrivalTimestamp);
         endOfDay.setHours(23, 59, 59, 999);
         
-        attendanceSheet.getRange(rowIndex, 5).setValue(endOfDay);
+        attendanceSheet.getRange(rowIndex, schema.colDepart).setValue(endOfDay);
         
-        const currentNote = values[i][7];
-        attendanceSheet.getRange(rowIndex, 8).setValue(
+        const currentNote = values[i][schema.colNote-1];
+        attendanceSheet.getRange(rowIndex, schema.colNote).setValue(
           currentNote + `\n[システム] ${gracePeriodHours}時間以上退勤未記録のため、同日23:59で仮設定`
         );
         
@@ -588,6 +606,41 @@ function _parseTimestamp_(v) {
   }
   // フォールバック
   return new Date(v);
+}
+
+/**
+ * 出勤簿シートのスキーマ（列配置）を検出
+ * - 8列形式: 日付, ユーザー名, 施設, 出社時刻, 退社時刻, 休憩時間, 実働時間, 備考
+ * - 7列形式: 日付, ユーザー名, 出社時刻, 退社時刻, 休憩時間, 実働時間, 備考
+ */
+function _getAttendanceSchema_(sheet) {
+  const headerLastCol = sheet.getLastColumn();
+  const header = sheet.getRange(1, 1, 1, Math.min(headerLastCol, 10)).getValues()[0];
+  const hasFacility = header.indexOf('施設') !== -1;
+  if (hasFacility) {
+    return {
+      colCount: 8,
+      colDate: 1,
+      colUser: 2,
+      colFacility: 3,
+      colArrive: 4,
+      colDepart: 5,
+      colBreak: 6,
+      colWork: 7,
+      colNote: 8
+    };
+  }
+  return {
+    colCount: 7,
+    colDate: 1,
+    colUser: 2,
+    colFacility: 0,
+    colArrive: 3,
+    colDepart: 4,
+    colBreak: 5,
+    colWork: 6,
+    colNote: 7
+  };
 }
 
 /**

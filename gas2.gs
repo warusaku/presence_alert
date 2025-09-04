@@ -112,7 +112,7 @@ function _updateAttendanceSheet_(sheet, data) {
       timestamp, data.username, facilityName,
       isOnline ? timeStr : '',
       isDeparture ? timeStr : '',
-      '', '', data.description
+      '', '', `[${timeStr}] ${data.description || ''}`
     ];
     sheet.appendRow(newRow);
   } else {
@@ -122,7 +122,7 @@ function _updateAttendanceSheet_(sheet, data) {
 
     // 外出復帰判定: 既に退勤時刻があり、8時間以内にONLINEで戻った
     if (isOnline && departureTime) {
-      const dep = departureTime instanceof Date ? departureTime : new Date(sheet.getRange(targetRow, 1).getValue().toDateString() + ' ' + departureTime);
+      const dep = _toDateWithTime_(sheet.getRange(targetRow, 1).getValue(), departureTime);
       const diffMs = timestamp.getTime() - dep.getTime();
       if (diffMs >= 0 && diffMs <= OUTING_WINDOW_MS) {
         // 退勤を取り消し、外出として備考に記録
@@ -148,8 +148,9 @@ function _updateAttendanceSheet_(sheet, data) {
     }
 
     // 備考追記（常に記録）
-    const currentNote2 = sheet.getRange(targetRow, 8).getValue();
-    sheet.getRange(targetRow, 8).setValue(currentNote2 + '\n' + `[${timeStr}] ${data.description}`);
+    const currentNote2 = String(sheet.getRange(targetRow, 8).getValue() || '');
+    const noteAppend = `[${timeStr}] ${data.description || ''}`;
+    sheet.getRange(targetRow, 8).setValue(currentNote2 ? (currentNote2 + '\n' + noteAppend) : noteAppend);
   }
 }
 
@@ -166,9 +167,9 @@ function _calculateWorkTime_(sheet, row) {
   // 時刻文字列をDateオブジェクトに変換
   const dateCell = sheet.getRange(row, 1).getValue();
   
-  // arrivalTimeとdepartureTimeがDateオブジェクトかチェックし、そうでなければ変換
-  const arrival = arrivalTime instanceof Date ? arrivalTime : new Date(dateCell.toDateString() + ' ' + arrivalTime);
-  const departure = departureTime instanceof Date ? departureTime : new Date(dateCell.toDateString() + ' ' + departureTime);
+  // 到着/退勤のDate化を安全に行う
+  const arrival = _toDateWithTime_(dateCell, arrivalTime);
+  const departure = _toDateWithTime_(dateCell, departureTime);
 
 
   // 総滞在時間（ミリ秒）
@@ -518,7 +519,9 @@ function reprocessRawData() {
 
   // 3. イベント発生時刻（timestamp列）でソートする
   rawValues.sort(function(a, b) {
-    return new Date(a[2]) - new Date(b[2]); // Column C (index 2) is timestamp
+    const da = _parseTimestamp_(a[2]);
+    const db = _parseTimestamp_(b[2]);
+    return da - db;
   });
 
   // 4. 1行ずつ処理して出勤簿を更新
@@ -581,4 +584,21 @@ function _parseTimestamp_(v) {
   }
   // フォールバック
   return new Date(v);
+}
+
+/**
+ * baseDateの「日付」を使って、timeValue（DateまたはHH:mm[:ss]文字列）をDateに組み立てる
+ */
+function _toDateWithTime_(baseDateValue, timeValue) {
+  if (timeValue instanceof Date) return timeValue;
+  const base = (baseDateValue instanceof Date) ? baseDateValue : _parseTimestamp_(baseDateValue);
+  const y = base.getFullYear();
+  const m = base.getMonth();
+  const d = base.getDate();
+  const parts = String(timeValue || '').split(':');
+  const hh = parseInt(parts[0] || '0', 10);
+  const mm = parseInt(parts[1] || '0', 10);
+  const ss = parseInt(parts[2] || '0', 10);
+  const dt = new Date(y, m, d, hh, mm, ss, 0);
+  return dt;
 }

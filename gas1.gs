@@ -48,38 +48,46 @@ function doPost(e) {
       console.warn('facility未登録: ', info.siteName);
     }
 
-    /* ---------- 5. data シートへ書き込み ---------- */
-    const dataSheet = ss.getSheetByName('data') || ss.insertSheet('data');
-    const newRow = [
-      info.eventDate,
-      info.macRaw.toUpperCase(),
-      dispName,
-      info.status,
-      info.ip || '',
-      facilityName, // 施設名を追加
-      JSON.stringify(payload)
-    ];
-    dataSheet.appendRow(newRow);
+  /* ---------- 5. data シートへ書き込み ---------- */
+  const dataSheet = ss.getSheetByName('data') || ss.insertSheet('data');
+  const newRow = [
+    info.eventDate,
+    info.macRaw.toUpperCase(),
+    dispName,
+    info.status,
+    info.ip || '',
+    facilityName, // 施設名を追加
+    JSON.stringify(payload)
+  ];
+  dataSheet.appendRow(newRow);
 
-    /* ---------- 6. 出勤判定ロジック ---------- */
-    const judgmentResult = _judgeAttendance_(dataSheet, macSheet, username, info.status, info.eventDate);
+  /* ---------- 6. 出勤判定ロジック ---------- */
+  const judgmentResult = _judgeAttendance_(dataSheet, macSheet, username, info.status, info.eventDate);
+  // 直近に追加した行の「判定内容」列（8列目）へ書き込み
+  try {
+    const appendedRowIndex = dataSheet.getLastRow();
+    dataSheet.getRange(appendedRowIndex, 8).setValue(judgmentResult.description);
+  } catch (e) {
+    console.warn('判定内容の書き込みに失敗:', e);
+  }
     
     /* ---------- 7. 出勤簿エンドポイントへ送信 ---------- */
-    if (endpoint) {
-      const postData = {
-        username: username,
-        // 互換性のため従来の文字列と、機械可読なEpoch(ms)の両方を送付
-        timestamp: _formatDateTime_(info.eventDate),
-        timestampMs: info.eventDate.getTime(),
-        state: info.status,
-        name: username,
-        devicename: dispName,
-        ipaddr: info.ip || '',
-        MAC: info.macRaw.toUpperCase(),
-        description: judgmentResult.description,
-        siteName: info.siteName, // サイト名を追加
-        facilityName: facilityName // 施設表示名を追加
-      };
+  // 施設名が未確定（空）の場合は出勤簿への送信をスキップ
+  if (endpoint && facilityName) {
+    const postData = {
+      username: username,
+      // 互換性のため従来の文字列と、機械可読なEpoch(ms)の両方を送付
+      timestamp: _formatDateTime_(info.eventDate),
+      timestampMs: info.eventDate.getTime(),
+      state: info.status,
+      name: username,
+      devicename: dispName,
+      ipaddr: info.ip || '',
+      MAC: info.macRaw.toUpperCase(),
+      description: judgmentResult.description,
+      siteName: info.siteName, // サイト名を追加
+      facilityName: facilityName // 施設表示名を追加
+    };
       
       try {
         UrlFetchApp.fetch(endpoint, {
@@ -100,6 +108,8 @@ function doPost(e) {
     return _ok_();
   } finally {
     try { lock.releaseLock(); } catch (_) {}
+  } else if (endpoint && !facilityName) {
+    console.warn('facilityNameが空のためgas2への送信をスキップ');
   }
 }
 

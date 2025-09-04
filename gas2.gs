@@ -71,8 +71,11 @@ function _updateAttendanceSheet_(sheet, data) {
   const dateStr = Utilities.formatDate(timestamp, 'Asia/Tokyo', 'yyyy/MM/dd');
   const timeStr = Utilities.formatDate(timestamp, 'Asia/Tokyo', 'HH:mm:ss');
   const facilityName = data.facilityName;
-  // 退勤はgas1の判定文言（"退勤" を含む）に依存させる
-  const isDeparture = (data.description && data.description.indexOf('退勤') !== -1);
+  // 退勤判定: 再構築時は OFFLINE を退勤候補として扱う。通常運用時はgas1の判定文言に依存。
+  const isReprocess = !!data.isReprocess;
+  const isDeparture = isReprocess
+    ? (data.state === 'OFFLINE')
+    : (data.description && data.description.indexOf('退勤') !== -1);
   const isOnline = data.state === 'ONLINE';
   const OUTING_WINDOW_MS = 8 * 60 * 60 * 1000; // 8時間以内は外出扱い
 
@@ -550,7 +553,8 @@ function reprocessRawData() {
       timestamp:    row[2],  // timestamp
       state:        row[3],  // state
       description:  row[8],  // description
-      facilityName: row[10] // facilityName
+      facilityName: row[10], // facilityName
+      isReprocess:  true
     };
 
     // 施設名フォールバック: 空なら siteName を利用、それも無ければ '未登録'

@@ -535,10 +535,14 @@ function reprocessRawData() {
       facilityName: row[10] // facilityName
     };
 
-    // 必須データがない場合はスキップ
-    if (!data.username || !data.timestamp || !data.facilityName) {
-      continue;
+    // 施設名フォールバック: 空なら siteName を利用、それも無ければ '未登録'
+    if (!data.facilityName) {
+      const siteName = row[9];
+      data.facilityName = siteName || '未登録';
     }
+
+    // 必須データ（username/timestamp）は必ず存在すること
+    if (!data.username || !data.timestamp) continue;
 
     // 既存のロジックを再利用して出勤簿を更新
     _updateAttendanceSheet_(attendanceSheet, data);

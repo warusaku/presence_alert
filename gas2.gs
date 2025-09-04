@@ -252,36 +252,35 @@ function _updateMonthlySummary_(summarySheet, attendanceSheet) {
   const schema = _getAttendanceSchema_(attendanceSheet);
   const allData = attendanceSheet.getRange(2, 1, lastRow - 1, schema.colCount).getValues();
 
-  // ユーザーと施設ごとの集計
-  const summaryMap = new Map();
+  // ユーザーごとの集計（施設は集約しない）
+  const summaryMap = new Map(); // key: user
 
   allData.forEach(row => {
     const date = row[schema.colDate-1];
     const user = row[schema.colUser-1];
-    const facility = schema.colFacility ? row[schema.colFacility-1] : '';
     const arrivalTime = row[schema.colArrive-1];
     const workTime = row[schema.colWork-1];
 
-    if (!date || !user || !facility) return;
+    if (!date || !user) return;
 
     const monthStr = Utilities.formatDate(new Date(date), 'Asia/Tokyo', 'yyyy/MM');
     if (monthStr !== currentMonth) return;
 
-    const summaryKey = `${user}_${facility || 'ALL'}`;
+    const summaryKey = String(user);
     if (!summaryMap.has(summaryKey)) {
       summaryMap.set(summaryKey, {
         user: user,
-        facility: facility,
-        days: 0,
+        daysSet: new Set(),
         totalMinutes: 0
       });
     }
 
     const summary = summaryMap.get(summaryKey);
 
-    // 出勤日数カウント（出社時刻がある場合のみ）
+    // 出勤日数カウント（同一日の重複を排除）
     if (arrivalTime) {
-      summary.days++;
+      const dayStr = Utilities.formatDate(new Date(date), 'Asia/Tokyo', 'yyyy/MM/dd');
+      summary.daysSet.add(dayStr);
     }
 
     // 実働時間の集計
@@ -297,7 +296,7 @@ function _updateMonthlySummary_(summarySheet, attendanceSheet) {
   const existingLastRow = summarySheet.getLastRow();
   const keepRows = [];
   if (existingLastRow > 1) {
-    const existing = summarySheet.getRange(2, 1, existingLastRow - 1, 6).getValues();
+    const existing = summarySheet.getRange(2, 1, existingLastRow - 1, 5).getValues();
     for (const row of existing) {
       if (row[0] && row[0] !== currentMonth) {
         keepRows.push(row);
@@ -307,13 +306,13 @@ function _updateMonthlySummary_(summarySheet, attendanceSheet) {
 
   // シート内容部をクリア（フォーマット維持）
   if (existingLastRow > 1) {
-    summarySheet.getRange(2, 1, existingLastRow - 1, 6).clearContent();
+    summarySheet.getRange(2, 1, existingLastRow - 1, 5).clearContent();
   }
 
   // まず当月以外の既存行を書き戻す
   let rowIndex = 2;
   if (keepRows.length > 0) {
-    summarySheet.getRange(rowIndex, 1, keepRows.length, 6).setValues(keepRows);
+    summarySheet.getRange(rowIndex, 1, keepRows.length, 5).setValues(keepRows);
     rowIndex += keepRows.length;
   }
 
@@ -321,12 +320,11 @@ function _updateMonthlySummary_(summarySheet, attendanceSheet) {
   summaryMap.forEach((summary) => {
     const totalHours = Math.floor(summary.totalMinutes / 60);
     const totalMins = summary.totalMinutes % 60;
-    summarySheet.getRange(rowIndex, 1, 1, 6).setValues([
+    summarySheet.getRange(rowIndex, 1, 1, 5).setValues([
       [
         currentMonth,
         summary.user,
-        summary.facility,
-        summary.days,
+        summary.daysSet.size,
         `${totalHours}時間${totalMins}分`,
         new Date()
       ]
@@ -345,25 +343,27 @@ function _rebuildMonthlySummaryAll_(summarySheet, attendanceSheet) {
   const schema = _getAttendanceSchema_(attendanceSheet);
   const allData = attendanceSheet.getRange(2, 1, lastRow - 1, schema.colCount).getValues();
 
-  const summaryMap = new Map(); // key: yyyy/MM__user__facility
+  const summaryMap = new Map(); // key: yyyy/MM__user
 
   allData.forEach(row => {
     const date = row[schema.colDate-1];
     const user = row[schema.colUser-1];
-    const facility = schema.colFacility ? (row[schema.colFacility-1] || '') : '';
     const arrivalTime = row[schema.colArrive-1];
     const workTime = row[schema.colWork-1];
 
     if (!date || !user) return;
 
     const monthStr = Utilities.formatDate(new Date(date), 'Asia/Tokyo', 'yyyy/MM');
-    const key = `${monthStr}__${user}__${facility}`;
+    const key = `${monthStr}__${user}`;
     if (!summaryMap.has(key)) {
-      summaryMap.set(key, { month: monthStr, user, facility, days: 0, totalMinutes: 0 });
+      summaryMap.set(key, { month: monthStr, user, daysSet: new Set(), totalMinutes: 0 });
     }
 
     const summary = summaryMap.get(key);
-    if (arrivalTime) summary.days++;
+    if (arrivalTime) {
+      const dayStr = Utilities.formatDate(new Date(date), 'Asia/Tokyo', 'yyyy/MM/dd');
+      summary.daysSet.add(dayStr);
+    }
     if (workTime) {
       const m = String(workTime).match(/(\d+)時間(\d+)分/);
       if (m) summary.totalMinutes += parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
@@ -372,26 +372,25 @@ function _rebuildMonthlySummaryAll_(summarySheet, attendanceSheet) {
 
   // 既存の内容をクリア（ヘッダー保持）
   if (summarySheet.getLastRow() > 1) {
-    summarySheet.getRange(2, 1, summarySheet.getLastRow() - 1, 6).clearContent();
+    summarySheet.getRange(2, 1, summarySheet.getLastRow() - 1, 5).clearContent();
   }
 
   // 書き込み（ソート: 月→ユーザー→施設）
   const rows = Array.from(summaryMap.values()).sort((a, b) => {
     if (a.month !== b.month) return a.month < b.month ? -1 : 1;
     if (a.user !== b.user) return a.user < b.user ? -1 : 1;
-    return (a.facility || '') < (b.facility || '') ? -1 : ((a.facility || '') > (b.facility || '') ? 1 : 0);
+    return 0;
   });
 
   let rowIndex = 2;
   for (const s of rows) {
     const totalHours = Math.floor(s.totalMinutes / 60);
     const totalMins = s.totalMinutes % 60;
-    summarySheet.getRange(rowIndex, 1, 1, 6).setValues([
+    summarySheet.getRange(rowIndex, 1, 1, 5).setValues([
       [
         s.month,
         s.user,
-        s.facility,
-        s.days,
+        s.daysSet.size,
         `${totalHours}時間${totalMins}分`,
         new Date()
       ]
@@ -451,12 +450,12 @@ function _createRawDataSheet_(ss) {
 
 function _createMonthlySummarySheet_(ss) {
   const sheet = ss.insertSheet('月次集計');
-  sheet.getRange(1, 1, 1, 6).setValues([
-    ['年月', 'ユーザー名', '施設', '出勤日数', '総実働時間', '更新日時']
+  sheet.getRange(1, 1, 1, 5).setValues([
+    ['年月', 'ユーザー名', '出勤日数', '総実働時間', '更新日時']
   ]);
 
   // ヘッダー装飾
-  const header = sheet.getRange(1, 1, 1, 6);
+  const header = sheet.getRange(1, 1, 1, 5);
   header.setBackground('#0f9d58');
   header.setFontColor('#ffffff');
   header.setFontWeight('bold');
@@ -467,7 +466,7 @@ function _createMonthlySummarySheet_(ss) {
   sheet.setColumnWidth(3, 120);
   sheet.setColumnWidth(4, 80);
   sheet.setColumnWidth(5, 100);
-  sheet.setColumnWidth(6, 150);
+  sheet.setColumnWidth(5, 150);
 
   return sheet;
 }
